@@ -9,101 +9,23 @@ import {
   validateUIMessages,
 } from 'ai'
 import { z } from 'zod'
-import { createOpenAI } from '@ai-sdk/openai'
-import { DynamoDBClient, CreateTableCommand, DescribeTableCommand } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb'
+import {
+  awsClient,
+  ddbDocClient,
+  ollamaProvider,
+  logToAWSAudit,
+  ensureAuditTableExists
+} from '../../../lib/infra/sreConfig'
+
+export { awsClient, ddbDocClient }
 
 export const maxDuration = 60
-
-// Initialisation du client AWS DynamoDB local ou cloud
-export const awsClient = new DynamoDBClient({
-  region: process.env.AWS_REGION || 'us-east-1',
-  endpoint: process.env.DYNAMODB_ENDPOINT || undefined,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID || 'localdev',
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || 'localdev',
-  },
-})
-export const ddbDocClient = DynamoDBDocumentClient.from(awsClient)
-
-let isTableChecked = false
-
-async function ensureAuditTableExists() {
-  if (isTableChecked) return
-  const tableName = process.env.AUDIT_TABLE_NAME || 'morphos-sre-audit-logs'
-  try {
-    await awsClient.send(new DescribeTableCommand({ TableName: tableName }))
-    isTableChecked = true
-  } catch (err: any) {
-    if (err.name === 'ResourceNotFoundException' || err.code === 'ResourceNotFoundException') {
-      console.log(`Table ${tableName} not found. Creating it...`)
-      try {
-        await awsClient.send(new CreateTableCommand({
-          TableName: tableName,
-          KeySchema: [
-            { AttributeName: 'incident_id', KeyType: 'HASH' },
-            { AttributeName: 'timestamp', KeyType: 'RANGE' }
-          ],
-          AttributeDefinitions: [
-            { AttributeName: 'incident_id', AttributeType: 'S' },
-            { AttributeName: 'timestamp', AttributeType: 'S' }
-          ],
-          ProvisionedThroughput: {
-            ReadCapacityUnits: 5,
-            WriteCapacityUnits: 5
-          }
-        }))
-        console.log(`Table ${tableName} created successfully.`)
-        isTableChecked = true
-      } catch (createErr) {
-        console.error(`Error creating DynamoDB table ${tableName}:`, createErr)
-      }
-    } else {
-      console.error(`Error checking DynamoDB table ${tableName}:`, err)
-    }
-  }
-}
-
-// Configuration du provider local Ollama
-const ollamaProvider = createOpenAI({
-  baseURL: process.env.OLLAMA_BASE_URL || 'http://host.docker.internal:11434/v1',
-  apiKey: 'ollama',
-})
 
 function sanitizeInput(val: string, pattern: RegExp, name: string): string {
   if (!pattern.test(val)) {
     throw new Error(`Invalid format for ${name}: Only alphanumeric characters and hyphens are allowed.`)
   }
   return val.replace(/[<>]/g, "").trim()
-}
-
-async function logToAWSAudit(payload: { incidentId: string; zone: string; summary: string; action: string }) {
-  // Timeout handling: limit DynamoDB operations to 5 seconds
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('DynamoDB request timeout (5s)')), 5000)
-  )
-
-  try {
-    await ensureAuditTableExists()
-    await Promise.race([
-      ddbDocClient.send(
-        new PutCommand({
-          TableName: process.env.AUDIT_TABLE_NAME || 'morphos-sre-audit-logs',
-          Item: {
-            incident_id: payload.incidentId,
-            timestamp: new Date().toISOString(),
-            authority_zone: payload.zone,
-            action_executed: payload.action,
-            resolution_details: payload.summary,
-          },
-        })
-      ),
-      timeoutPromise
-    ])
-  } catch (err: any) {
-    console.error('[AWS DDB] Erreur écriture audit:', err)
-    throw err
-  }
 }
 
 const evaluateIncidentTool = tool({
@@ -123,24 +45,48 @@ const evaluateIncidentTool = tool({
 
       await new Promise((resolve) => setTimeout(resolve, 800))
       const isAuto = severity === 'low' || severity === 'medium'
+      const isCritical = severity === 'critical'
 
-      const output = {
-        incidentId: cleanIncidentId,
-        severity,
-        affectedServices: cleanServices,
-        summary: cleanSummary,
-        recommendedAction: isAuto ? 'Restart affected pods and clear cache' : 'Scale up compute tier and re-route traffic',
-        autoRemediated: isAuto,
-        actionTaken: isAuto ? 'Automatically restarted 2 pods and flushed Redis cache' : undefined,
-        riskLevel: 'high' as const,
-        timestamp: new Date().toISOString(),
+      let output: any
+      let zone: string
+      let auditAction: string
+
+      if (isCritical) {
+        output = {
+          incidentId: cleanIncidentId,
+          severity,
+          affectedServices: cleanServices,
+          summary: cleanSummary,
+          recommendedAction: 'Immediate L3 escalation and platform lock',
+          autoRemediated: false,
+          escalationLevel: 'L3',
+          escalatedTo: 'On-call SRE Lead + Platform Engineering',
+          riskLevel: 'critical' as const,
+          timestamp: new Date().toISOString(),
+        }
+        zone = 'RED'
+        auditAction = 'CRITICAL_ESCALATION'
+      } else {
+        output = {
+          incidentId: cleanIncidentId,
+          severity,
+          affectedServices: cleanServices,
+          summary: cleanSummary,
+          recommendedAction: isAuto ? 'Restart affected pods and clear cache' : 'Scale up compute tier and re-route traffic',
+          autoRemediated: isAuto,
+          actionTaken: isAuto ? 'Automatically restarted 2 pods and flushed Redis cache' : undefined,
+          riskLevel: 'high' as const,
+          timestamp: new Date().toISOString(),
+        }
+        zone = isAuto ? 'GREEN' : 'ORANGE'
+        auditAction = output.recommendedAction
       }
 
       await logToAWSAudit({
         incidentId: cleanIncidentId,
-        zone: isAuto ? 'GREEN' : 'ORANGE',
+        zone,
         summary: cleanSummary,
-        action: output.recommendedAction
+        action: auditAction
       })
 
       return output
@@ -246,7 +192,7 @@ export async function POST(req: Request) {
                   incidentId: out.incidentId || part.toolCallId,
                   zone: 'ORANGE',
                   summary: 'Operator denied remediation action.',
-                  action: 'CANCEL_BY_OPERATOR_DENIED'
+                  action: 'OPERATOR_DENIED'
                 })
               } catch (e) {
                 console.error('Failed to log operator denial to DynamoDB:', e)
@@ -257,7 +203,7 @@ export async function POST(req: Request) {
                   incidentId: out.incidentId || part.toolCallId,
                   zone: 'ORANGE',
                   summary: 'Operator approved remediation action.',
-                  action: 'APPROVE_BY_OPERATOR_INITIATED'
+                  action: 'OPERATOR_APPROVED'
                 })
               } catch (e) {
                 console.error('Failed to log operator approval to DynamoDB:', e)
@@ -269,7 +215,7 @@ export async function POST(req: Request) {
     }
 
     const result = streamText({
-      model: ollamaProvider(process.env.LLM_MODEL_ID || 'qwen3.5:latest'),
+      model: ollamaProvider.chat(process.env.LLM_MODEL_ID || 'qwen3.5:latest'),
       system: 'You are MorphOS SRE, an autonomous Site Reliability Engineering agent. Always call evaluateIncident first.',
       messages: await convertToModelMessages(messages),
       stopWhen: stepCountIs(6),

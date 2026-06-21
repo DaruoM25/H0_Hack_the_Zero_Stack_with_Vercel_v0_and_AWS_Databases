@@ -1,8 +1,9 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { ScanCommand } from '@aws-sdk/lib-dynamodb'
 
-// We import the real clients and tools from the Chat route
-import { sreTools, awsClient, ddbDocClient, POST } from '../app/api/chat/route'
+// We import the real clients from the decoupled infrastructure module, and tools/POST from the Chat route
+import { awsClient, ddbDocClient } from '../lib/infra/sreConfig'
+import { sreTools, POST } from '../app/api/chat/route'
 
 describe('SRE Agent - UX & Resilience QA Test Suite (Real Integration)', () => {
   beforeEach(() => {
@@ -202,6 +203,137 @@ describe('SRE Agent - UX & Resilience QA Test Suite (Real Integration)', () => {
       expect(savedItem).toBeDefined()
       expect(savedItem?.authority_zone).toBe('GREEN')
       expect(savedItem?.resolution_details).toContain('Page loading is extremely slow')
-    }, 120000) // 120s timeout for LLM generation
+    }, 300000) // 300s timeout for LLM generation
+
+    test('should write audit record to DynamoDB Local when operator manual validation (Approve/Deny) is processed', async () => {
+      // 1. GIVEN: An incident of severity high is simulated
+      const testToolCallId = 'call-high-incident-1234'
+      const request = new Request('http://localhost:3000/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: [
+            {
+              id: 'msg-user-1',
+              role: 'user',
+              content: 'Scale up compute tier',
+              parts: [{ type: 'text', text: 'Scale up compute tier' }],
+            },
+            {
+              id: 'msg-assistant-1',
+              role: 'assistant',
+              content: '',
+              parts: [
+                {
+                  type: 'tool-evaluateIncident',
+                  state: 'output-available',
+                  toolCallId: testToolCallId,
+                  input: {
+                    incidentId: 'INC-HIGH-7777',
+                    severity: 'high',
+                    affectedServices: ['payment-service'],
+                    summary: 'Scale up compute tier',
+                  },
+                  output: {
+                    incidentId: 'INC-HIGH-7777',
+                    severity: 'high',
+                    affectedServices: ['payment-service'],
+                    summary: 'Operator approved remediation action.',
+                    recommendedAction: 'Approved',
+                    autoRemediated: true,
+                    actionTaken: 'Operator approved — remediation initiated.',
+                    timestamp: new Date().toISOString(),
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      })
+
+      // 2. WHEN: The POST route is hit with the manual approval output
+      const response = await POST(request)
+      expect(response.status).toBe(200)
+
+      // Consume stream to ensure request completes
+      const reader = response.body?.getReader()
+      if (reader) {
+        while (true) {
+          const { done } = await reader.read()
+          if (done) break
+        }
+      }
+
+      // 3. THEN: The audit record must exist in DynamoDB Local containing OPERATOR_APPROVED
+      const tableName = process.env.AUDIT_TABLE_NAME || 'morphos-sre-audit-logs'
+      const dbResult = await ddbDocClient.send(
+        new ScanCommand({
+          TableName: tableName,
+        })
+      )
+
+      const savedItem = dbResult.Items?.find(item => item.incident_id === 'INC-HIGH-7777')
+      expect(savedItem).toBeDefined()
+      expect(savedItem?.authority_zone).toBe('ORANGE')
+      expect(savedItem?.action_executed).toBe('OPERATOR_APPROVED')
+      expect(savedItem?.resolution_details).toBe('Operator approved remediation action.')
+    }, 120000)
+
+    test('should process critical incident and create RED zone audit log with CRITICAL_ESCALATION', async () => {
+      // 1. GIVEN: A major critical severity incident is simulated
+      const request = new Request('http://localhost:3000/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: [
+            {
+              id: 'msg-user-1',
+              role: 'user',
+              content: 'Evaluate the incident INC-CRIT-9999 with severity critical on service api-gateway: API gateway is down across us-east-1.',
+              parts: [{ type: 'text', text: 'Evaluate the incident INC-CRIT-9999 with severity critical on service api-gateway: API gateway is down across us-east-1.' }],
+            },
+          ],
+        }),
+      })
+
+      // 2. WHEN: The API route processes the critical request without any mocks
+      const response = await POST(request)
+      expect(response.status).toBe(200)
+
+      // Consume stream to ensure request completes
+      const reader = response.body?.getReader()
+      let chunksCount = 0
+      const decoder = new TextDecoder()
+      if (reader) {
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          if (value) {
+            chunksCount++
+            const text = decoder.decode(value)
+            console.log('Stream chunk:', text)
+          }
+        }
+      }
+      expect(chunksCount).toBeGreaterThan(0)
+
+      // 3. THEN: The audit record must exist in DynamoDB Local with the RED zone and CRITICAL_ESCALATION marker
+      const tableName = process.env.AUDIT_TABLE_NAME || 'morphos-sre-audit-logs'
+      const dbResult = await ddbDocClient.send(
+        new ScanCommand({
+          TableName: tableName,
+        })
+      )
+
+      const savedItem = dbResult.Items?.find(item => item.incident_id === 'INC-CRIT-9999')
+      expect(savedItem).toBeDefined()
+      expect(savedItem?.authority_zone).toBe('RED')
+      expect(savedItem?.action_executed).toBe('CRITICAL_ESCALATION')
+      expect(savedItem?.resolution_details).toBeDefined()
+    }, 300000)
   })
 })

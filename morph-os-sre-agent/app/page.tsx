@@ -76,9 +76,7 @@ export default function MorphOSPage() {
 
   const handleApprove = useCallback(
     (toolCallId: string) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(addToolOutput as any)({
-        tool: 'evaluateIncident',
+      addToolOutput({
         toolCallId,
         output: {
           incidentId: toolCallId,
@@ -101,9 +99,7 @@ export default function MorphOSPage() {
 
   const handleDeny = useCallback(
     (toolCallId: string) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ;(addToolOutput as any)({
-        tool: 'evaluateIncident',
+      addToolOutput({
         toolCallId,
         output: {
           incidentId: toolCallId,
