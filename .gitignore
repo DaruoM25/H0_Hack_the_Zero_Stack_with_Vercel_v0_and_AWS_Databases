@@ -1,0 +1,15 @@
+morph-os-sre-agent.zip
+1/
+morph-os-sre-agent/.agents
+morph-os-sre-agent/.agents
+morph-os-sre-agent/morphos-sre_context.md
+morph-os-sre-agent/bundle.py
+morph-os-sre-agent/.env
+
+# Ignorer tous les fichiers qui se terminent par une extension spécifique (ex: les logs)
+*.log
+*.tmp
+
+# Ignorer les fichiers système invisibles
+.DS_Store
+Thumbs.db
