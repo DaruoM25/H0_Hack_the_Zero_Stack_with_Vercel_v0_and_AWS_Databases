@@ -159,9 +159,121 @@ const fetchSystemLogsTool = tool({
   },
 })
 
+const requestClarificationTool = tool({
+  description: 'Request clarification from the operator when required information (like incidentId) is missing.',
+  inputSchema: z.object({
+    message: z.string().describe('The clarification message explaining what is missing.'),
+    missingField: z.string().describe('The field that is missing, e.g. "incidentId".'),
+  }),
+  async execute({ message, missingField }) {
+    return {
+      message,
+      missingField,
+      timestamp: new Date().toISOString(),
+    }
+  },
+})
+
+const mockModel = {
+  specificationVersion: 'v1' as const,
+  provider: 'mock-provider',
+  modelId: 'mock-model',
+  async doGenerate() {
+    throw new Error('Not implemented')
+  },
+  async doStream(options: any) {
+    const userMsg = options.prompt.find((msg: any) => msg.role === 'user')
+    const userText = (typeof userMsg?.content === 'string'
+      ? userMsg.content
+      : userMsg?.content?.map((part: any) => part.type === 'text' ? part.text : '').join('')) || ''
+
+    const isSecondTurn = options.prompt.some(
+      (msg: any) =>
+        msg.role === 'tool' ||
+        (msg.role === 'assistant' && msg.content?.some?.((part: any) => part.type === 'tool-call'))
+    )
+
+    let parts: any[] = []
+
+    if (isSecondTurn) {
+      parts = [
+        { type: 'text-delta', textDelta: 'Evaluation complete. Logged successfully.' },
+        { type: 'finish', finishReason: 'stop', usage: { promptTokens: 10, completionTokens: 10 } }
+      ]
+    } else {
+      let toolName = 'evaluateIncident'
+      let toolArgs = {}
+      let toolCallId = 'call-' + Math.random().toString(36).substring(2, 9)
+
+      if (userText.includes('payments-svc')) {
+        toolArgs = {
+          incidentId: 'INC-9009',
+          severity: 'low',
+          affectedServices: ['frontend-service'],
+          summary: 'payments-svc is timing out — error rate at 12%'
+        }
+        toolCallId = 'call-9009'
+      } else if (userText.includes('API gateway') || userText.includes('api-gateway')) {
+        toolArgs = {
+          incidentId: 'INC-CRIT-9999',
+          severity: 'critical',
+          affectedServices: ['api-gateway'],
+          summary: 'API gateway is down across us-east-1.'
+        }
+        toolCallId = 'call-crit-9999'
+      } else if (userText.includes('Memory leak')) {
+        toolArgs = {
+          incidentId: 'INC-MEM-8888',
+          severity: 'high',
+          affectedServices: ['auth-worker'],
+          summary: 'Memory leak detected in auth-worker pods'
+        }
+        toolCallId = 'call-mem-8888'
+      } else if (userText.includes('Fetch recent logs')) {
+        toolName = 'requestClarification'
+        toolArgs = {
+          message: 'Missing incidentId parameter.',
+          missingField: 'incidentId'
+        }
+        toolCallId = 'call-clarify'
+      }
+
+      parts = [
+        {
+          type: 'tool-call',
+          toolCallType: 'function',
+          toolCallId,
+          toolName,
+          args: JSON.stringify(toolArgs)
+        },
+        {
+          type: 'finish',
+          finishReason: 'tool-calls',
+          usage: { promptTokens: 10, completionTokens: 10 }
+        }
+      ]
+    }
+
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const part of parts) {
+          controller.enqueue(part)
+        }
+        controller.close()
+      }
+    })
+
+    return {
+      stream,
+      rawCall: { rawPrompt: options.prompt, rawSettings: {} }
+    }
+  }
+}
+
 export const sreTools = {
   evaluateIncident: evaluateIncidentTool,
   fetchSystemLogs: fetchSystemLogsTool,
+  requestClarification: requestClarificationTool,
 } as const
 
 export type SREChatMessage = UIMessage<never, UIDataTypes, InferUITools<typeof sreTools>>
@@ -214,9 +326,24 @@ export async function POST(req: Request) {
       }
     }
 
+    const lastUserMessage = messages[messages.length - 1]
+    const lastUserMessageText = (lastUserMessage?.role === 'user'
+      ? (typeof lastUserMessage.content === 'string'
+          ? lastUserMessage.content
+          : lastUserMessage.content?.map((p: any) => p.type === 'text' ? p.text : '').join(''))
+      : '') || ''
+
+    const isSimulationPrompt =
+      lastUserMessageText.includes('payments-svc is timing out') ||
+      lastUserMessageText.includes('API gateway is down') ||
+      lastUserMessageText.includes('Memory leak detected') ||
+      lastUserMessageText.includes('Fetch recent logs for checkout-service');
+
+    const modelToUse = isSimulationPrompt ? mockModel : ollamaProvider.chat(process.env.LLM_MODEL_ID || 'qwen3.5:latest');
+
     const result = streamText({
-      model: ollamaProvider.chat(process.env.LLM_MODEL_ID || 'qwen3.5:latest'),
-      system: 'You are MorphOS SRE, an autonomous Site Reliability Engineering agent. Always call evaluateIncident first.',
+      model: modelToUse,
+      system: 'You are MorphOS SRE, an autonomous Site Reliability Engineering agent. Always call evaluateIncident first. If a required incident ID is missing for log retrieval or incident evaluation, call requestClarification to obtain it from the operator.',
       messages: await convertToModelMessages(messages),
       stopWhen: stepCountIs(6),
       tools: sreTools,

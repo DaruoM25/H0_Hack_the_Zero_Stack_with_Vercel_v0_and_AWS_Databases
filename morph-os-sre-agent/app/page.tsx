@@ -8,6 +8,7 @@ import { GreenBadge } from '@/components/morphos/GreenBadge'
 import { ActionCard } from '@/components/morphos/ActionCard'
 import { CrisisSummary } from '@/components/morphos/CrisisSummary'
 import { Terminal } from '@/components/morphos/Terminal'
+import { ClarificationCard } from '@/components/morphos/ClarificationCard'
 import type { SREChatMessage } from '@/app/api/chat/route'
 
 type ActionResolution = {
@@ -134,6 +135,12 @@ export default function MorphOSPage() {
             !out.escalationLevel &&
             !resolutions.some((r) => r.toolCallId === part.toolCallId)
           )
+        }
+        if (
+          part.type === 'tool-requestClarification' &&
+          part.state === 'output-available'
+        ) {
+          return !resolutions.some((r) => r.toolCallId === part.toolCallId)
         }
         return false
       })
@@ -331,6 +338,63 @@ export default function MorphOSPage() {
                                 onDeny={handleDeny}
                                 resolved={!!resolution}
                                 resolution={resolution?.resolution}
+                              />
+                            )
+                          }
+                        }
+
+                        // requestClarification tool
+                        if (part.type === 'tool-requestClarification') {
+                          if (
+                            part.state === 'input-available' ||
+                            part.state === 'input-streaming'
+                          ) {
+                            return (
+                              <div
+                                key={i}
+                                className="flex items-center gap-2 py-1"
+                              >
+                                <Loader2
+                                  size={12}
+                                  className="animate-spin text-amber-500"
+                                />
+                                <span className="text-xs font-mono text-zinc-600">
+                                  Awaiting operator input...
+                                </span>
+                              </div>
+                            )
+                          }
+
+                          if (part.state === 'output-available') {
+                            const out = part.output as Record<string, unknown>
+                            if (!out) return null
+
+                            const resolution = resolutions.find(
+                              (r) => r.toolCallId === part.toolCallId
+                            )
+
+                            return (
+                              <ClarificationCard
+                                key={i}
+                                toolCallId={part.toolCallId}
+                                message={(out.message as string) || "Clarification required"}
+                                missingField={(out.missingField as string) || "incidentId"}
+                                onResolve={(toolCallId, value) => {
+                                  addToolOutput({
+                                    toolCallId,
+                                    output: {
+                                      incidentId: value,
+                                      resolved: true,
+                                      value,
+                                    },
+                                  })
+                                  setResolutions((prev) => [
+                                    ...prev,
+                                    { toolCallId, resolution: `Provided ${out.missingField}: ${value}` },
+                                  ])
+                                }}
+                                resolved={!!resolution}
+                                resolutionValue={resolution?.resolution}
                               />
                             )
                           }
