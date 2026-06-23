@@ -4,9 +4,10 @@ import { useEffect, useRef } from 'react'
 
 interface TerminalProps {
   logs: string[]
+  incidentId?: string
 }
 
-export default function Terminal({ logs }: TerminalProps) {
+export function Terminal({ logs, incidentId }: TerminalProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -24,7 +25,7 @@ export default function Terminal({ logs }: TerminalProps) {
         <span className="h-3 w-3 rounded-full bg-sre-warn/80" />
         <span className="h-3 w-3 rounded-full bg-sre-success/80" />
         <span className="ml-2 font-mono text-xs uppercase tracking-widest text-zinc-500">
-          morphos://telemetry-stream
+          {incidentId ? `morphos://logs/${incidentId}` : 'morphos://telemetry-stream'}
         </span>
         <span className="ml-auto flex items-center gap-1.5">
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sre-success shadow-[0_0_8px] shadow-sre-success" />
