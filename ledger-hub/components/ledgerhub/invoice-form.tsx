@@ -152,7 +152,7 @@ export function InvoiceForm({ onBack }: { onBack: () => void }) {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div>
                 <label className={labelBase} htmlFor="number">{f.invoiceNo}</label>
-                <input id="number" className={`${inputBase} font-mono`} defaultValue="FAC-2026-0143" />
+                <input id="number" className={`${inputBase} font-mono`} placeholder="FAC-2026-0143" />
               </div>
               <div>
                 <label className={labelBase} htmlFor="issue">{f.issueDate}</label>
